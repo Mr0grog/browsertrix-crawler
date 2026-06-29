@@ -14,7 +14,7 @@ jobs:
 
       - name: Docker image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: mr0grog/test-browsertrix-crawler
           tags: |
@@ -22,7 +22,7 @@ jobs:
             type=schedule,pattern=test-{{date 'YYYYMMDD-HHmmss' tz='Asia/Tokyo'}}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
