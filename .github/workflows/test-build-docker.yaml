@@ -1,13 +1,21 @@
-name: Publish Docker image
+name: Test Publish Docker image
+
 on:
   push:
     branches:
       - test-better-labels-for-better-living-in-docker
 
+env:
+  IMAGE_NAME: mr0grog/test-browsertrix-crawler
+
 jobs:
-  push_to_registries:
-    name: Build x86 and ARM Images and push to Dockerhub
-    runs-on: ubuntu-22.04
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      name: '${{ env.IMAGE_NAME }}'
+      tags: '${{ steps.meta.outputs.tags }}'
+      labels: '${{ steps.meta.outputs.labels }}'
+      json: '${{ steps.meta.outputs.json }}'
     steps:
       - name: Check out the repo
         uses: actions/checkout@v6
@@ -16,15 +24,21 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: mr0grog/test-browsertrix-crawler
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=semver,pattern={{version}},value=v1.0.0-b1
-            type=schedule,pattern=test-{{date 'YYYYMMDD-HHmmss' tz='Asia/Tokyo'}}
+            type=sha
 
-      # - name: Set up QEMU
-      #   uses: docker/setup-qemu-action@v4
-      #   with:
-      #     platforms: arm64
+  build:
+    name: Build Images
+    needs: meta
+    strategy:
+      matrix:
+        platform: ["ubuntu-24.04", "ubuntu-24.04-arm"]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -40,12 +54,76 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          # push: true
+          # tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ needs.meta.outputs.labels }}
           # platforms: "linux/amd64,linux/arm64"
+          outputs: type=image,"name=${{ needs.meta.outputs.name }}",push-by-digest=true,name-canonical=true,push=true
           build-args: |
             MINIMIZE_IMAGE_SIZE=1
 
       - name: Image digest
         run: echo ${{ steps.docker_build.outputs.digest }}
+      
+      # Kind of a funky hack to get matrix job outputs to the next job.
+      # Uploaded artifacts can be merged, so we make a directory full of empty
+      # files named for the digests we want as outputs. In the next job, we
+      # merge all the relevant artifacts and list the file names to get the
+      # digests that need to be combined as inputs.
+      - name: Export digest
+        # if: ${{ inputs.publish }}
+        env:
+          DIGEST: '${{ steps.docker_build.outputs.digest }}'
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        # if: ${{ inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.platform }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    # if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    needs:
+      - meta
+      - build
+    steps:
+      # Other side of the above hack for for matrix job outputs. This merges
+      # the artifacts from each build job and reads the file names to get the
+      # list of inputs (digests of the docker builds to be merged).
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Push tags with combined images
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          TAGS: '${{ needs.meta.outputs.tags }}'
+        run: |
+          for docker_tag in $(echo $TAGS | xargs -L1 echo); do
+            echo "Publishing tag: '${docker_tag}'"
+
+            docker buildx imagetools create \
+              --tag "${docker_tag}" \
+              $(printf '${{ needs.meta.outputs.name }}@sha256:%s ' *)
+
+            docker buildx imagetools inspect "${docker_tag}"
+          done
