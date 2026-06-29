@@ -19,6 +19,7 @@ jobs:
           images: mr0grog/test-browsertrix-crawler
           tags: |
             type=semver,pattern={{version}},value=v1.0.0b1
+            type=schedule,pattern=test-{{date 'YYYYMMDD-HHmmss' tz='Asia/Tokyo'}}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
